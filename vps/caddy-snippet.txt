@@ -1,0 +1,8 @@
+# Add this block inside your rickyscontrolcenter.com site block in /etc/caddy/Caddyfile
+# (or in a separate caddy snippet file)
+#
+# It proxies /api/apk/* to the local manifest service on port 3099.
+
+handle /api/apk/* {
+    reverse_proxy localhost:3099
+}
