@@ -13,6 +13,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,22 +24,12 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon
-
-      # ── For release builds, use assembleRelease + sign ──────────────────────
-      # - name: Build release APK
-      #   run: ./gradlew assembleRelease --no-daemon
-      #   env:
-      #     KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-      #     KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-      #     KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-      #     STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
 
       - name: Get version info
         id: version
@@ -50,85 +42,38 @@ jobs:
           APK_SIZE=$(stat -c%s app/build/outputs/apk/debug/app-debug.apk)
           echo "apk_size=$APK_SIZE" >> $GITHUB_OUTPUT
 
-      - name: Upload APK to Google Drive
-        id: drive_upload
+      - name: Create GitHub Release and upload APK
+        id: release
         env:
-          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          pip install google-api-python-client google-auth --quiet
+          VERSION="${{ steps.version.outputs.version_name }}"
+          SHA="${{ steps.version.outputs.sha_short }}"
+          TAG="v${VERSION}-${SHA}"
+          APK_NAME="MyAndroid_${VERSION}_${SHA}.apk"
 
-          python3 << 'EOF'
-          import os, json, sys
-          from googleapiclient.discovery import build
-          from googleapiclient.http import MediaFileUpload
-          from google.oauth2 import service_account
+          gh release delete "$TAG" --yes 2>/dev/null || true
 
-          sa_info = json.loads(os.environ['GDRIVE_SA_JSON'])
-          creds = service_account.Credentials.from_service_account_info(
-              sa_info,
-              scopes=['https://www.googleapis.com/auth/drive.file']
-          )
-          service = build('drive', 'v3', credentials=creds)
+          gh release create "$TAG" \
+            app/build/outputs/apk/debug/app-debug.apk#"$APK_NAME" \
+            --title "My Android $VERSION ($SHA)" \
+            --notes "Automated build from commit $SHA" \
+            --latest
 
-          apk_path = 'app/build/outputs/apk/debug/app-debug.apk'
-          file_name = f"MyAndroid_${{ steps.version.outputs.version_name }}_${{ steps.version.outputs.sha_short }}.apk"
-
-          # Delete old APKs with same app prefix to keep Drive tidy
-          results = service.files().list(
-              q=f"name contains 'MyAndroid_' and '{os.environ['GDRIVE_FOLDER_ID']}' in parents and trashed=false",
-              fields='files(id,name)'
-          ).execute()
-          for f in results.get('files', []):
-              service.files().delete(fileId=f['id']).execute()
-              print(f"Deleted old: {f['name']}")
-
-          # Upload new APK
-          file_meta = {
-              'name': file_name,
-              'parents': [os.environ['GDRIVE_FOLDER_ID']]
-          }
-          media = MediaFileUpload(apk_path, mimetype='application/vnd.android.package-archive', resumable=True)
-          uploaded = service.files().create(body=file_meta, media_body=media, fields='id,webContentLink').execute()
-
-          # Make it publicly readable
-          service.permissions().create(
-              fileId=uploaded['id'],
-              body={'type': 'anyone', 'role': 'reader'}
-          ).execute()
-
-          # Direct download URL
-          download_url = f"https://drive.google.com/uc?export=download&id={uploaded['id']}"
-          print(f"Uploaded: {file_name}")
-          print(f"URL: {download_url}")
-
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-              fh.write(f"apk_url={download_url}\n")
-              fh.write(f"file_name={file_name}\n")
-          EOF
+          APK_URL=$(gh release view "$TAG" --json assets --jq '.assets[] | select(.name == "'"$APK_NAME"'") | .browserDownloadUrl')
+          echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
+          echo "APK URL: $APK_URL"
 
       - name: Update VPS manifest
         env:
           VPS_MANIFEST_TOKEN: ${{ secrets.VPS_MANIFEST_TOKEN }}
         run: |
           NOTES="${{ github.event.inputs.notes }}"
-          if [ -z "$NOTES" ]; then
-            NOTES="Build from commit ${{ steps.version.outputs.sha_short }}"
-          fi
-
+          if [ -z "$NOTES" ]; then NOTES="Build ${{ steps.version.outputs.version_name }} from ${{ steps.version.outputs.sha_short }}"; fi
           curl -s -X POST https://rickyscontrolcenter.com/api/apk/manifest \
             -H "Authorization: Bearer $VPS_MANIFEST_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{
-              "version": "${{ steps.version.outputs.version_name }}",
-              "versionCode": ${{ steps.version.outputs.version_code }},
-              "buildAt": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
-              "apkUrl": "${{ steps.drive_upload.outputs.apk_url }}",
-              "apkSize": ${{ steps.version.outputs.apk_size }},
-              "commitSha": "${{ steps.version.outputs.sha_short }}",
-              "appName": "My Android",
-              "notes": "'"$NOTES"'"
-            }'
+            -d "{\"version\":\"${{ steps.version.outputs.version_name }}\",\"versionCode\":${{ steps.version.outputs.version_code }},\"buildAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"apkUrl\":\"${{ steps.release.outputs.apk_url }}\",\"apkSize\":${{ steps.version.outputs.apk_size }},\"commitSha\":\"${{ steps.version.outputs.sha_short }}\",\"appName\":\"My Android\",\"notes\":\"$NOTES\"}"
 
       - name: Upload APK artifact (backup)
         uses: actions/upload-artifact@v4
