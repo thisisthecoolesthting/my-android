@@ -14,7 +14,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write   # needed to create GitHub Releases
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,18 +50,21 @@ jobs:
           VERSION="${{ steps.version.outputs.version_name }}"
           SHA="${{ steps.version.outputs.sha_short }}"
           TAG="v${VERSION}-${SHA}"
-          APK_NAME="MyAndroid_${VERSION}_${SHA}.apk"
 
+          # Delete any existing release with same tag (idempotent)
           gh release delete "$TAG" --yes 2>/dev/null || true
 
+          # Create release and upload APK
           gh release create "$TAG" \
-            app/build/outputs/apk/debug/app-debug.apk#"$APK_NAME" \
+            app/build/outputs/apk/debug/app-debug.apk \
             --title "My Android $VERSION ($SHA)" \
             --notes "Automated build from commit $SHA" \
             --latest
 
-          APK_URL=$(gh release view "$TAG" --json assets --jq '.assets[] | select(.name == "'"$APK_NAME"'") | .browserDownloadUrl')
+          # Construct direct download URL (asset is always named app-debug.apk)
+          APK_URL="https://github.com/thisisthecoolesthting/my-android/releases/download/${TAG}/app-debug.apk"
           echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "APK URL: $APK_URL"
 
       - name: Update VPS manifest
@@ -69,11 +72,24 @@ jobs:
           VPS_MANIFEST_TOKEN: ${{ secrets.VPS_MANIFEST_TOKEN }}
         run: |
           NOTES="${{ github.event.inputs.notes }}"
-          if [ -z "$NOTES" ]; then NOTES="Build ${{ steps.version.outputs.version_name }} from ${{ steps.version.outputs.sha_short }}"; fi
-          curl -s -X POST https://rickyscontrolcenter.com/api/apk/manifest \
+          if [ -z "$NOTES" ]; then
+            NOTES="Build ${{ steps.version.outputs.version_name }} from ${{ steps.version.outputs.sha_short }}"
+          fi
+
+          RESPONSE=$(curl -s -X POST https://rickyscontrolcenter.com/api/apk/manifest \
             -H "Authorization: Bearer $VPS_MANIFEST_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"version\":\"${{ steps.version.outputs.version_name }}\",\"versionCode\":${{ steps.version.outputs.version_code }},\"buildAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"apkUrl\":\"${{ steps.release.outputs.apk_url }}\",\"apkSize\":${{ steps.version.outputs.apk_size }},\"commitSha\":\"${{ steps.version.outputs.sha_short }}\",\"appName\":\"My Android\",\"notes\":\"$NOTES\"}"
+            -d "{
+              \"version\": \"${{ steps.version.outputs.version_name }}\",
+              \"versionCode\": ${{ steps.version.outputs.version_code }},
+              \"buildAt\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+              \"apkUrl\": \"${{ steps.release.outputs.apk_url }}\",
+              \"apkSize\": ${{ steps.version.outputs.apk_size }},
+              \"commitSha\": \"${{ steps.version.outputs.sha_short }}\",
+              \"appName\": \"My Android\",
+              \"notes\": \"$NOTES\"
+            }")
+          echo "Manifest response: $RESPONSE"
 
       - name: Upload APK artifact (backup)
         uses: actions/upload-artifact@v4
